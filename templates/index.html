@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="row">
+  <div class="col-md-6">
+    <h5>Importer un fichier quotidien</h5>
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <input class="form-control" type="file" name="file" accept=".xlsx,.xls,.csv" required>
+      </div>
+      <button class="btn btn-primary" type="submit">Importer</button>
+    </form>
+    <hr>
+    <h6>Exporter RECAP</h6>
+    <form method="get" action="{{ url_for('export') }}" class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label">Début</label>
+        <input type="date" name="start" value="{{ start }}" class="form-control">
+      </div>
+      <div class="col-auto">
+        <label class="form-label">Fin</label>
+        <input type="date" name="end" value="{{ end }}" class="form-control">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-success">Exporter Excel</button>
+      </div>
+    </form>
+  </div>
+  <div class="col-md-6">
+    <h5>RECAP</h5>
+    <div style="max-height:70vh; overflow:auto;">
+      {{ table_html | safe }}
+    </div>
+  </div>
+</div>
+
+{% endblock %}

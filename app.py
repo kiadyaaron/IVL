@@ -9,7 +9,7 @@ import config
 
 # Excel styling
 import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 UPLOAD_EXTENSIONS = ['.xlsx', '.xls', '.csv']
@@ -88,7 +88,7 @@ def create_app():
 
         rows = q.with_entities(
             Attendance.date,
-            Employee.matricule, Employee.nom, Employee.prenom,
+            Employee.matricule, Employee.nom, Employee.prenom, Employee.poste, Employee.site, Employee.affaire,
             Attendance.present, Attendance.absent, Attendance.cong,
             Attendance.tour_rep, Attendance.repos_med, Attendance.sans_ph
         ).order_by(Attendance.date.asc(), Employee.matricule.asc()).all()
@@ -100,12 +100,15 @@ def create_app():
                 'Matricule': r[1],
                 'Nom': r[2] or '',
                 'Prénom': r[3] or '',
-                'Présent': int(r[4] or 0),
-                'Absent': int(r[5] or 0),
-                'CONG': int(r[6] or 0),
-                'Tour_rep': int(r[7] or 0),
-                'Repos_med': int(r[8] or 0),
-                'Sans_ph': int(r[9] or 0)
+                'Poste': r[4] or '',
+                'Site': r[5] or '',
+                'Affaire': r[6] or '',
+                'Présent': int(r[7] or 0),
+                'Absent': int(r[8] or 0),
+                'CONG': int(r[9] or 0),
+                'Tour_rep': int(r[10] or 0),
+                'Repos_med': int(r[11] or 0),
+                'Sans_ph': int(r[12] or 0)
             })
 
         detail_df = pd.DataFrame(detail_data)
@@ -124,13 +127,16 @@ def create_app():
                             'Matricule': r['Matricule'],
                             'Nom': r['Nom'],
                             'Prénom': r['Prénom'],
+                            'Poste': r['Poste'],
+                            'Site': r['Site'],
+                            'Affaire': r['Affaire'],
                             'Status': s,
                             'Value': val
                         })
                 long_df = pd.DataFrame(long_rows)
 
                 pivot = long_df.pivot_table(
-                    index=['Matricule', 'Nom', 'Prénom'],
+                    index=['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire'],
                     columns=['Date', 'Status'],
                     values='Value',
                     aggfunc=lambda x: next((v for v in x if v and str(v).strip() != ''), ''),
@@ -145,7 +151,7 @@ def create_app():
 
                 pivot.to_excel(writer, sheet_name='Tableau croisé')
             else:
-                pd.DataFrame(columns=['Matricule', 'Nom', 'Prénom']).to_excel(writer, sheet_name='Tableau croisé')
+                pd.DataFrame(columns=['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire']).to_excel(writer, sheet_name='Tableau croisé')
 
             # --- FEUILLE RÉCAP ---
             numeric_cols = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
@@ -158,13 +164,23 @@ def create_app():
             recap_df_with_total = pd.concat([recap_df, pd.DataFrame([totals_row])], ignore_index=True)
             recap_df_with_total.to_excel(writer, sheet_name='Récap', index=False)
 
-        # --- STYLING ET FUSION DES ENTÊTES ---
+        # --- STYLING ET COULEURS ---
         wb = openpyxl.load_workbook(out_path)
         ws = wb['Tableau croisé']
 
         header_fill = PatternFill(start_color='FFD966', end_color='FFD966', fill_type='solid')
         font_bold = Font(bold=True)
         center = Alignment(horizontal='center', vertical='center')
+        thin_border = Border(
+            left=Side(style='thin', color='000000'),
+            right=Side(style='thin', color='000000'),
+            top=Side(style='thin', color='000000'),
+            bottom=Side(style='thin', color='000000')
+        )
+
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.border = thin_border
 
         for row in ws.iter_rows(min_row=1, max_row=2):
             for cell in row:
@@ -177,9 +193,10 @@ def create_app():
         color_index = 0
         colors = ["FFF2CC", "D9EAD3", "CFE2F3", "F4CCCC", "EAD1DC", "C9DAF8"]
 
+        fixed_cols = 6  # Matricule, Nom, Prénom, Poste, Site, Affaire
         for col_idx in range(1, ws.max_column + 1):
             val = ws.cell(row=1, column=col_idx).value
-            if col_idx <= 3:
+            if col_idx <= fixed_cols:
                 ws.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
                 ws.cell(row=1, column=col_idx).alignment = center
                 continue
@@ -189,7 +206,6 @@ def create_app():
                     ws.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=col_idx - 1)
                 start_col = col_idx
                 prev_val = val
-            # Coloration alternée par bloc
             col_fill = PatternFill(start_color=colors[color_index], end_color=colors[color_index], fill_type='solid')
             for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
                 ws.cell(row=row[0].row, column=col_idx).fill = col_fill
@@ -208,11 +224,16 @@ def create_app():
                 cell.fill = fill_header
                 cell.font = font_bold
                 cell.alignment = center
+                cell.border = thin_border
             total_fill = PatternFill(start_color='FFE699', end_color='FFE699', fill_type='solid')
             for cell in ws2[ws2.max_row]:
                 cell.fill = total_fill
                 cell.font = font_bold
                 cell.alignment = center
+                cell.border = thin_border
+            for row in ws2.iter_rows():
+                for cell in row:
+                    cell.border = thin_border
             for col in range(1, ws2.max_column + 1):
                 ws2.column_dimensions[get_column_letter(col)].width = 14
 

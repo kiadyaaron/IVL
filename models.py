@@ -13,6 +13,15 @@ class Employee(db.Model):
     site = db.Column(db.String(128))
     affaire = db.Column(db.String(128))
 
+    # nouvelles colonnes demandées
+    classe = db.Column(db.String(50))
+    affectation = db.Column(db.String(100))
+    ville = db.Column(db.String(100))
+
+    # taux statiques (float)
+    taux_lgt = db.Column(db.Float, default=0.0)   # "taux logement"
+    taux_repas = db.Column(db.Float, default=0.0) # "taux repas"
+
     attendances = db.relationship('Attendance', back_populates='employee', cascade='all, delete-orphan')
 
     def __repr__(self):
@@ -36,6 +45,4 @@ class Attendance(db.Model):
     __table_args__ = (db.UniqueConstraint('employee_id', 'date', name='_emp_date_uc'),)
 
     def __repr__(self):
-        return f"<Employee {self.matricule} {self.nom}>"
-
-
+        return f"<Attendance emp_id={self.employee_id} date={self.date}>"

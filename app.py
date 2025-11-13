@@ -1,17 +1,18 @@
 import os
 import re
-from flask import Flask, render_template, request, redirect, url_for, send_file, flash
-from werkzeug.utils import secure_filename
 from datetime import datetime, date
+from flask import Flask, render_template, request, redirect, url_for, send_file, flash
+from flask_migrate import Migrate
+from werkzeug.utils import secure_filename
 import pandas as pd
-from models import db, Employee, Attendance
-import config
-
-# Excel styling
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+from models import db, Employee, Attendance
+import config
+
+# Extensions de fichiers acceptées pour le téléchargement
 UPLOAD_EXTENSIONS = ['.xlsx', '.xls', '.csv']
 
 
@@ -19,11 +20,14 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object('config')
     db.init_app(app)
+    Migrate(app, db)
 
+    # Créer les dossiers d'export et d'upload s'ils n'existent pas
     os.makedirs(app.config.get('EXPORT_FOLDER', os.path.join(os.path.dirname(__file__), 'exports')), exist_ok=True)
     os.makedirs(app.config.get('UPLOAD_FOLDER', os.path.join(os.path.dirname(__file__), 'uploads')), exist_ok=True)
 
     with app.app_context():
+        # S'assurer que les tables de la base de données existent
         db.create_all()
 
     @app.route('/', methods=['GET', 'POST'])
@@ -31,26 +35,28 @@ def create_app():
         if request.method == 'POST':
             f = request.files.get('file')
             if not f:
-                flash('No file uploaded', 'warning')
+                flash('Aucun fichier téléchargé', 'warning')
                 return redirect(url_for('index'))
 
             filename = secure_filename(f.filename)
             if not filename:
-                flash('Invalid filename', 'warning')
+                flash('Nom de fichier invalide', 'warning')
                 return redirect(url_for('index'))
 
             ext = os.path.splitext(filename)[1].lower()
             if ext not in UPLOAD_EXTENSIONS:
-                flash('Unsupported file type', 'danger')
+                flash('Type de fichier non supporté', 'danger')
                 return redirect(url_for('index'))
 
             save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             f.save(save_path)
+
             try:
-                rows_added = process_upload(save_path, filename)
-                flash(f'Processed file. Rows added/updated: {rows_added}', 'success')
+                rows_added = process_upload(save_path)
+                flash(f'Fichier importé avec succès. Lignes ajoutées/mises à jour : {rows_added}', 'success')
             except Exception as e:
                 flash(f'Erreur lors du traitement : {e}', 'danger')
+
             return redirect(url_for('index'))
 
         start = request.args.get('start')
@@ -62,7 +68,7 @@ def create_app():
             start_date = end_date = None
 
         recap_df = build_recap(start_date, end_date)
-        table_html = recap_df.to_html(classes='table table-sm table-striped', index=False) if not recap_df.empty else '<p>Aucune donnée</p>'
+        table_html = recap_df.to_html(classes='table table-striped table-sm', index=False) if not recap_df.empty else '<p>Aucune donnée</p>'
         return render_template('index.html', table_html=table_html, start=start, end=end)
 
     @app.route('/export', methods=['GET'])
@@ -80,6 +86,7 @@ def create_app():
             flash('Aucune donnée à exporter', 'warning')
             return redirect(url_for('index'))
 
+        # Export simple (Détails + Récap)
         q = Attendance.query.join(Employee)
         if start_date:
             q = q.filter(Attendance.date >= start_date)
@@ -88,7 +95,8 @@ def create_app():
 
         rows = q.with_entities(
             Attendance.date,
-            Employee.matricule, Employee.nom, Employee.prenom, Employee.poste, Employee.site, Employee.affaire,
+            Employee.matricule, Employee.nom, Employee.prenom, Employee.poste,
+            Employee.site, Employee.affaire,
             Attendance.present, Attendance.absent, Attendance.cong,
             Attendance.tour_rep, Attendance.repos_med, Attendance.sans_ph
         ).order_by(Attendance.date.asc(), Employee.matricule.asc()).all()
@@ -115,286 +123,235 @@ def create_app():
         out_path = os.path.join(app.config['EXPORT_FOLDER'], f'recap_{datetime.now().strftime("%Y%m%d%H%M%S")}.xlsx')
 
         with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-            # --- FEUILLE TABLEAU CROISÉ ---
             if not detail_df.empty:
-                statuses = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
-                long_rows = []
-                for _, r in detail_df.iterrows():
-                    for s in statuses:
-                        val = 'X' if int(r[s]) != 0 else ''
-                        long_rows.append({
-                            'Date': r['Date'],
-                            'Matricule': r['Matricule'],
-                            'Nom': r['Nom'],
-                            'Prénom': r['Prénom'],
-                            'Poste': r['Poste'],
-                            'Site': r['Site'],
-                            'Affaire': r['Affaire'],
-                            'Status': s,
-                            'Value': val
-                        })
-                long_df = pd.DataFrame(long_rows)
-
-                pivot = long_df.pivot_table(
-                    index=['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire'],
-                    columns=['Date', 'Status'],
-                    values='Value',
-                    aggfunc=lambda x: next((v for v in x if v and str(v).strip() != ''), ''),
-                    fill_value=''
-                )
-
-                try:
-                    cols_sorted = sorted(pivot.columns, key=lambda t: datetime.strptime(t[0], '%d/%m/%Y'))
-                    pivot = pivot[cols_sorted]
-                except Exception:
-                    pass
-
-                pivot.to_excel(writer, sheet_name='Tableau croisé')
+                detail_df.to_excel(writer, sheet_name='Détails', index=False)
             else:
-                pd.DataFrame(columns=['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire']).to_excel(writer, sheet_name='Tableau croisé')
+                pd.DataFrame(columns=['Date', 'Matricule']).to_excel(writer, sheet_name='Détails', index=False)
 
-            # --- FEUILLE RÉCAP ---
-            numeric_cols = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
-            for c in numeric_cols:
-                if c in recap_df.columns:
-                    recap_df[c] = recap_df[c].astype(int)
-            totals = {col: recap_df[col].sum() if col in recap_df.columns else 0 for col in numeric_cols}
-            totals_row = {'Matricule': 'TOTAL', 'Nom': '', 'Prénom': '', 'Poste': '', 'Site': '', 'Affaire': ''}
-            totals_row.update(totals)
-            recap_df_with_total = pd.concat([recap_df, pd.DataFrame([totals_row])], ignore_index=True)
-            recap_df_with_total.to_excel(writer, sheet_name='Récap', index=False)
+            recap_df.to_excel(writer, sheet_name='Récap', index=False)
 
-        # --- STYLING ET COULEURS ---
-        wb = openpyxl.load_workbook(out_path)
-        ws = wb['Tableau croisé']
-
-        header_fill = PatternFill(start_color='FFD966', end_color='FFD966', fill_type='solid')
-        font_bold = Font(bold=True)
-        center = Alignment(horizontal='center', vertical='center')
-        thin_border = Border(
-            left=Side(style='thin', color='000000'),
-            right=Side(style='thin', color='000000'),
-            top=Side(style='thin', color='000000'),
-            bottom=Side(style='thin', color='000000')
-        )
-
-        for row in ws.iter_rows():
-            for cell in row:
-                cell.border = thin_border
-
-        for row in ws.iter_rows(min_row=1, max_row=2):
-            for cell in row:
-                cell.fill = header_fill
-                cell.font = font_bold
-                cell.alignment = center
-
-        prev_val = None
-        start_col = None
-        color_index = 0
-        colors = ["FFF2CC", "D9EAD3", "CFE2F3", "F4CCCC", "EAD1DC", "C9DAF8"]
-
-        fixed_cols = 6  # Matricule, Nom, Prénom, Poste, Site, Affaire
-        for col_idx in range(1, ws.max_column + 1):
-            val = ws.cell(row=1, column=col_idx).value
-            if col_idx <= fixed_cols:
-                ws.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
-                ws.cell(row=1, column=col_idx).alignment = center
-                continue
-            if val != prev_val:
-                color_index = (color_index + 1) % len(colors)
-                if prev_val is not None and start_col is not None and (col_idx - start_col) > 1:
-                    ws.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=col_idx - 1)
-                start_col = col_idx
-                prev_val = val
-            col_fill = PatternFill(start_color=colors[color_index], end_color=colors[color_index], fill_type='solid')
-            for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
-                ws.cell(row=row[0].row, column=col_idx).fill = col_fill
-
-        if prev_val and start_col and (ws.max_column - start_col + 1) > 1:
-            ws.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=ws.max_column)
-
-        for col in range(1, ws.max_column + 1):
-            ws.column_dimensions[get_column_letter(col)].width = 14
-
-        # FEUILLE RECAP STYLÉE
-        if 'Récap' in wb.sheetnames:
-            ws2 = wb['Récap']
-            fill_header = PatternFill(start_color='9BC2E6', end_color='9BC2E6', fill_type='solid')
-            for cell in ws2[1]:
-                cell.fill = fill_header
-                cell.font = font_bold
-                cell.alignment = center
-                cell.border = thin_border
-            total_fill = PatternFill(start_color='FFE699', end_color='FFE699', fill_type='solid')
-            for cell in ws2[ws2.max_row]:
-                cell.fill = total_fill
-                cell.font = font_bold
-                cell.alignment = center
-                cell.border = thin_border
-            for row in ws2.iter_rows():
-                for cell in row:
-                    cell.border = thin_border
-            for col in range(1, ws2.max_column + 1):
-                ws2.column_dimensions[get_column_letter(col)].width = 14
-
-        wb.save(out_path)
         return send_file(out_path, as_attachment=True, download_name=os.path.basename(out_path))
 
     return app
 
 
-# --- FONCTIONS UTILITAIRES ---
+# -------------------------
+# Fonctions utilitaires
+# -------------------------
 
-def normalize_col(name):
-    if not isinstance(name, str):
+def _normalize(s: str) -> str:
+    """Normalise une chaîne de caractères pour la comparaison des en-têtes de colonnes."""
+    if s is None:
         return ''
-    return re.sub(r'[^A-Za-z0-9]', '', name).strip().lower()
+    # Supprime les caractères non alphanumériques (y compris les espaces)
+    return re.sub(r'[^A-Za-z0-9éàèêôùïçÉÀÈ]', '', str(s)).strip().lower()
 
 
-def possible_status_cols(cols):
-    mapping = {}
-    for c in cols:
-        n = normalize_col(str(c))
-        if n in ['present', 'présent', 'prsent']:
-            mapping[c] = 'present'
-        elif n in ['absent']:
-            mapping[c] = 'absent'
-        elif 'cong' in n:
-            mapping[c] = 'cong'
-        elif 'tour' in n and 'rep' in n:
-            mapping[c] = 'tour_rep'
-        elif 'repos' in n or 'med' in n:
-            mapping[c] = 'repos_med'
-        elif 'sans' in n and 'ph' in n:
-            mapping[c] = 'sans_ph'
-    return mapping
+def _is_date_string(s: str) -> bool:
+    """Vérifie si la chaîne correspond au format de date jj/mm/aaaa."""
+    if not s:
+        return False
+    s = str(s).strip()
+    # Accepte jj/mm/aaaa ou j/m/aaaa
+    return bool(re.match(r'^\d{1,2}\/\d{1,2}\/\d{4}$', s))
 
 
-def parse_date_from_filename(filename):
-    m = re.search(r'(20\d{2}[01]\d[0-3]\d)', filename)
-    if m:
-        try:
-            return datetime.strptime(m.group(1), '%Y%m%d').date()
-        except Exception:
-            pass
-    m = re.search(r'(\b\d{2}[\-_/]?\d{2}[\-_/]?\d{4}\b)', filename)
-    if m:
-        s = re.sub(r'[^0-9]', '', m.group(1))
-        try:
-            return datetime.strptime(s, '%d%m%Y').date()
-        except Exception:
-            pass
-    return None
+def process_upload(path: str) -> int:
+    """
+    Lit un fichier Excel à double en-tête (header=[0,1]) où les dates sont en première ligne
+    et les sous-colonnes (Présent, Absent, ...) en seconde ligne.
+    Insère / met à jour les attendances.
+    Retourne le nombre d'enregistrements d'attendance traités.
+    """
+    # Lecture en multi-index header (lignes 0 et 1)
+    df = pd.read_excel(path, header=[0, 1], engine='openpyxl')
+    # S'assurer que les noms de colonnes sont strings pour la cohérence
+    df.columns = [(str(a).strip(), str(b).strip()) for a, b in df.columns]
 
+    # Définition des variantes canoniques pour les colonnes fixes
+    canonical_fixed = {
+        'matricule': ['matricule', 'id'],
+        'nom': ['nom', 'name'],
+        'prenom': ['prenom', 'prénom', 'prenom'],
+        'poste': ['poste', 'position'],
+        'site': ['site'],
+        'affaire': ['affaire'],
+        'taux_logement': ['tauxlogement', 'taux_logement', 'taux_lgt', 'taux logement', 'tauxlgt'],
+        'taux_repas': ['tauxrepas', 'taux_repas', 'taux repas']
+    }
 
-def process_upload(path, filename):
-    try:
-        df = pd.read_excel(path, engine='openpyxl')
-    except Exception:
-        try:
-            df = pd.read_excel(path)
-        except Exception:
-            df = pd.read_csv(path)
+    # Identification des colonnes fixes dans le DataFrame
+    fixed_map = {}
+    for col in df.columns:
+        a, b = col
+        a_n = _normalize(a)
+        b_n = _normalize(b)
+        for canon, variants in canonical_fixed.items():
+            # Une correspondance est trouvée si le nom normalisé de l'un des deux niveaux
+            # correspond à une variante canonique
+            if a_n in variants or b_n in variants:
+                fixed_map[canon] = col
 
-    df.columns = [str(c).strip() for c in df.columns]
-    colmap = {normalize_col(c): c for c in df.columns}
+    # Identification des colonnes de date / statut
+    # La structure de l'image (Date en niveau 0, Statut en niveau 1) est gérée ici.
+    date_columns = {}
+    for col in df.columns:
+        a, b = col # a = niveau 0 (Date), b = niveau 1 (Statut)
+        if _is_date_string(a):
+            date_str = a.strip()
+            status = b.strip() or ''
+            date_columns.setdefault(date_str, {})[status] = col
 
-    if not any(k in colmap for k in ['matricule', 'id']):
-        raise ValueError('Fichier sans colonne Matricule / id')
+    # Si aucune date n'est trouvée au niveau 0, on essaie au niveau 1 (cas moins fréquent)
+    if not date_columns:
+        for col in df.columns:
+            a, b = col
+            if _is_date_string(b):
+                date_str = b.strip()
+                status = a.strip() or ''
+                date_columns.setdefault(date_str, {})[status] = col
 
-    date_col = None
-    for k in colmap:
-        if k == 'date':
-            date_col = colmap[k]
-            break
-
-    file_date = None
-    if date_col is None:
-        file_date = parse_date_from_filename(filename) or date.today()
-
-    rows = 0
+    rows_processed = 0
     with db.session.begin():
-        for _, row in df.iterrows():
-            try:
-                matricule = None
-                for key in ['matricule', 'id']:
-                    if key in colmap:
-                        matricule = str(row[colmap[key]]).strip()
-                        break
-                if not matricule or matricule.lower().startswith('nan'):
-                    continue
+        for idx, row in df.iterrows():
+            # 1. Identification de l'employé par Matricule
+            matricule = None
+            if 'matricule' in fixed_map:
+                matricule = row[fixed_map['matricule']]
+            else:
+                # Heuristique de secours: prendre la première colonne
+                matricule = row[df.columns[0]]
 
-                emp = Employee.query.filter_by(matricule=matricule).first()
-                if not emp:
-                    emp = Employee(matricule=matricule)
-                    db.session.add(emp)
-                    db.session.flush()
-
-                for fld in [('nom', 'nom'), ('prenom', 'prenom'), ('poste', 'poste'), ('site', 'site'),
-                            ('affaire', 'affaire')]:
-                    nkey = fld[0]
-                    if nkey in colmap:
-                        val = row[colmap[nkey]]
-                        if pd.notna(val):
-                            setattr(emp, fld[1], str(val).strip())
-
-                row_date = None
-                if date_col:
-                    raw = row[date_col]
-                    if pd.isna(raw):
-                        row_date = file_date or date.today()
-                    elif isinstance(raw, (datetime, pd.Timestamp)):
-                        row_date = raw.date()
-                    else:
-                        try:
-                            row_date = pd.to_datetime(raw).date()
-                        except Exception:
-                            row_date = file_date or date.today()
-                else:
-                    row_date = file_date or date.today()
-
-                status_map = possible_status_cols(df.columns)
-                vals = dict(present=0, absent=0, cong=0, tour_rep=0, repos_med=0, sans_ph=0)
-                for orig_col, canon in status_map.items():
-                    try:
-                        v = row[orig_col]
-                        if pd.isna(v):
-                            continue
-                        if isinstance(v, str):
-                            if v.strip().lower() in ['x', '1', 'y', 'yes', 'présent', 'present', 'p']:
-                                vals[canon] = 1
-                        else:
-                            if int(v) != 0:
-                                vals[canon] = 1
-                    except Exception:
-                        continue
-
-                if sum(vals.values()) == 0:
-                    continue
-
-                att = Attendance.query.filter_by(employee_id=emp.id, date=row_date).first()
-                if not att:
-                    att = Attendance(employee_id=emp.id, date=row_date, **vals)
-                    db.session.add(att)
-                else:
-                    att.present = max(att.present, vals['present'])
-                    att.absent = max(att.absent, vals['absent'])
-                    att.cong = max(att.cong, vals['cong'])
-                    att.tour_rep = max(att.tour_rep, vals['tour_rep'])
-                    att.repos_med = max(att.repos_med, vals['repos_med'])
-                    att.sans_ph = max(att.sans_ph, vals['sans_ph'])
-
-                rows += 1
-            except Exception as e:
-                print('row error', e)
+            if pd.isna(matricule):
+                continue
+            matricule = str(matricule).strip()
+            if not matricule:
                 continue
 
-    return rows
+            emp = Employee.query.filter_by(matricule=matricule).first()
+            if not emp:
+                emp = Employee(matricule=matricule)
+                db.session.add(emp)
+                db.session.flush()
+
+            # 2. Mise à jour des informations fixes de l'employé
+            for key in ('nom', 'prenom', 'poste', 'site', 'affaire'):
+                if key in fixed_map:
+                    val = row[fixed_map[key]]
+                    if pd.notna(val):
+                        try:
+                            setattr(emp, key, str(val).strip())
+                        except Exception:
+                            pass
+
+            # Mise à jour des taux (logement / repas)
+            if 'taux_logement' in fixed_map:
+                try:
+                    val = row[fixed_map['taux_logement']]
+                    if pd.notna(val):
+                        v = float(val)
+                        # Le code tente de mettre à jour taux_lgt ou taux_logement
+                        if hasattr(emp, 'taux_lgt'):
+                            setattr(emp, 'taux_lgt', v)
+                        elif hasattr(emp, 'taux_logement'):
+                            setattr(emp, 'taux_logement', v)
+                except Exception:
+                    pass
+
+            if 'taux_repas' in fixed_map:
+                try:
+                    val = row[fixed_map['taux_repas']]
+                    if pd.notna(val):
+                        v = float(val)
+                        if hasattr(emp, 'taux_repas'):
+                            setattr(emp, 'taux_repas', v)
+                except Exception:
+                    pass
+
+            # 3. Parcours des dates et statuts (le cœur de l'import)
+            for date_str, status_map in date_columns.items():
+                try:
+                    date_obj = datetime.strptime(date_str, '%d/%m/%Y').date()
+                except Exception:
+                    continue
+
+                present_flag = 0
+                absent_flag = 0
+                cong_flag = 0
+                tourrep_flag = 0
+                repos_flag = 0
+                sansph_flag = 0
+
+                # HELPER CORRIGÉ: Teste si une cellule indique une présence/un statut
+                def cell_true(val):
+                    """Vérifie si la valeur de la cellule indique un statut positif (Présent, Absent, X, 1, 1.0, etc.)."""
+                    if pd.isna(val):
+                        return False
+                    
+                    # CORRECTION: Si c'est un nombre (int ou float, comme 1.0), vérifiez s'il est > 0
+                    if isinstance(val, (int, float)):
+                        return val > 0
+                    
+                    # Sinon, traitez-le comme une chaîne
+                    s = str(val).strip().lower()
+                    if not s:
+                        return False
+                    
+                    # Correspondance avec les indicateurs courants ('x', '1', 'yes', 'p', etc.)
+                    return s in ('x', '1', 'yes', 'y', 'présent', 'present', 'p') or re.match(r'^\d+$', s) and int(s) > 0
+
+
+                # Vérification des statuts en utilisant la clé du niveau 1 de l'en-tête (ex: 'Présent', 'Absent', 'Repos médica')
+                for status_label, colkey in status_map.items():
+                    sval = row[colkey]
+                    
+                    if pd.notna(sval) and cell_true(sval):
+                        sn = status_label.strip().lower()
+                        
+                        # Correspondance souple avec les labels
+                        if 'prés' in sn or 'present' in sn:
+                            present_flag = 1
+                        elif 'abs' in sn:
+                            absent_flag = 1
+                        elif 'cong' in sn:
+                            cong_flag = 1
+                        elif 'tour' in sn and 'rep' in sn:
+                            tourrep_flag = 1
+                        elif 'repos' in sn or 'méd' in sn or 'med' in sn:
+                            repos_flag = 1
+                        elif 'sans' in sn and 'ph' in sn:
+                            sansph_flag = 1
+
+                # Si aucun statut n'est marqué pour cette date, on passe
+                if (present_flag + absent_flag + cong_flag + tourrep_flag + repos_flag + sansph_flag) == 0:
+                    continue
+
+                # 4. Insertion / Mise à jour de l'attendance (upsert)
+                att = Attendance.query.filter_by(employee_id=emp.id, date=date_obj).first()
+                if not att:
+                    att = Attendance(employee_id=emp.id, date=date_obj,
+                                     present=present_flag, absent=absent_flag, cong=cong_flag,
+                                     tour_rep=tourrep_flag, repos_med=repos_flag, sans_ph=sansph_flag)
+                    db.session.add(att)
+                else:
+                    # OR-combine les marques existantes et nouvelles (priorité à 1 si déjà 1)
+                    att.present = max(att.present, present_flag)
+                    att.absent = max(att.absent, absent_flag)
+                    att.cong = max(att.cong, cong_flag)
+                    att.tour_rep = max(att.tour_rep, tourrep_flag)
+                    att.repos_med = max(att.repos_med, repos_flag)
+                    att.sans_ph = max(att.sans_ph, sansph_flag)
+
+                rows_processed += 1
+
+    return rows_processed
 
 
 def build_recap(start_date=None, end_date=None):
+    """Construit le DataFrame de récapitulatif des présences par employé."""
     q = Attendance.query.join(Employee).with_entities(
-        Employee.matricule, Employee.nom, Employee.prenom, Employee.poste, Employee.site, Employee.affaire,
+        Employee.matricule, Employee.nom, Employee.prenom, Employee.poste,
+        Employee.site, Employee.affaire,
         db.func.sum(Attendance.present).label('Présent'),
         db.func.sum(Attendance.absent).label('Absent'),
         db.func.sum(Attendance.cong).label('CONG'),
@@ -411,6 +368,7 @@ def build_recap(start_date=None, end_date=None):
     rows = q.all()
     if not rows:
         return pd.DataFrame()
+
     data = []
     for r in rows:
         data.append({

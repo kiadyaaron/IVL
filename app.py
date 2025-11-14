@@ -248,8 +248,18 @@ def create_app():
         first_header.extend(total_headers_first)
         second_header.extend(total_headers_second)
         
-        # Chemin du fichier d'export
-        out_path = os.path.join(app.config['EXPORT_FOLDER'], f'export_presence_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx')
+       # Chemin du fichier d'export avec plage de dates
+        start = request.args.get('start')
+        end = request.args.get('end')
+
+        # Formater les dates pour le nom de fichier (remplacer '/' par '-')
+        start_str = start.replace('/', '-') if start else datetime.now().strftime('%d-%m-%Y')
+        end_str = end.replace('/', '-') if end else datetime.now().strftime('%d-%m-%Y')
+
+        out_path = os.path.join(
+            app.config['EXPORT_FOLDER'],
+            f'presence_{start_str}_{end_str}.xlsx'
+        )
         
         # Créer le fichier Excel manuellement avec openpyxl
         workbook = openpyxl.Workbook()

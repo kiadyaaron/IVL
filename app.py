@@ -12,7 +12,6 @@ from openpyxl.utils import get_column_letter
 from models import db, Employee, Attendance
 import config
 
-# Extensions de fichiers acceptées pour le téléchargement
 UPLOAD_EXTENSIONS = ['.xlsx', '.xls', '.csv']
 
 
@@ -22,12 +21,10 @@ def create_app():
     db.init_app(app)
     Migrate(app, db)
 
-    # Créer les dossiers d'export et d'upload s'ils n'existent pas
     os.makedirs(app.config.get('EXPORT_FOLDER', os.path.join(os.path.dirname(__file__), 'exports')), exist_ok=True)
     os.makedirs(app.config.get('UPLOAD_FOLDER', os.path.join(os.path.dirname(__file__), 'uploads')), exist_ok=True)
 
     with app.app_context():
-        # S'assurer que les tables de la base de données existent
         db.create_all()
 
     @app.route('/', methods=['GET', 'POST'])
@@ -81,12 +78,7 @@ def create_app():
         except Exception:
             start_date = end_date = None
 
-        recap_df = build_recap(start_date, end_date)
-        if recap_df.empty:
-            flash('Aucune donnée à exporter', 'warning')
-            return redirect(url_for('index'))
-
-        # Export simple (Détails + Récap)
+        # Récupérer les données détaillées
         q = Attendance.query.join(Employee)
         if start_date:
             q = q.filter(Attendance.date >= start_date)
@@ -96,39 +88,292 @@ def create_app():
         rows = q.with_entities(
             Attendance.date,
             Employee.matricule, Employee.nom, Employee.prenom, Employee.poste,
-            Employee.site, Employee.affaire,
+            Employee.site, Employee.affaire, Employee.classe, Employee.affectation, Employee.ville,
+            Employee.taux_lgt, Employee.taux_repas,
             Attendance.present, Attendance.absent, Attendance.cong,
             Attendance.tour_rep, Attendance.repos_med, Attendance.sans_ph
-        ).order_by(Attendance.date.asc(), Employee.matricule.asc()).all()
+        ).order_by(Employee.matricule.asc(), Attendance.date.asc()).all()
 
-        detail_data = []
+        if not rows:
+            flash('Aucune donnée à exporter', 'warning')
+            return redirect(url_for('index'))
+
+        # Préparer les données pour l'export au même format que l'import
+        employees_data = {}
+        dates_set = set()
+        
+        # Calculer les totaux par employé
+        employee_totals = {}
+        
         for r in rows:
-            detail_data.append({
-                'Date': r[0].strftime('%d/%m/%Y'),
-                'Matricule': r[1],
-                'Nom': r[2] or '',
-                'Prénom': r[3] or '',
-                'Poste': r[4] or '',
-                'Site': r[5] or '',
-                'Affaire': r[6] or '',
-                'Présent': int(r[7] or 0),
-                'Absent': int(r[8] or 0),
-                'CONG': int(r[9] or 0),
-                'Tour_rep': int(r[10] or 0),
-                'Repos_med': int(r[11] or 0),
-                'Sans_ph': int(r[12] or 0)
+            matricule = r[1]
+            date_obj = r[0]
+            dates_set.add(date_obj)
+            
+            if matricule not in employees_data:
+                employees_data[matricule] = {
+                    'matricule': matricule,
+                    'nom': r[2] or '',
+                    'prenom': r[3] or '',
+                    'poste': r[4] or '',
+                    'site': r[5] or '',
+                    'affaire': r[6] or '',
+                    'classe': r[7] or '',
+                    'affectation': r[8] or '',
+                    'ville': r[9] or '',
+                    'taux_lgt': r[10] or 0.0,
+                    'taux_repas': r[11] or 0.0,
+                    'attendances': {}
+                }
+                
+                # Initialiser les totaux pour cet employé
+                employee_totals[matricule] = {
+                    'present': 0,
+                    'absent': 0,
+                    'cong': 0,
+                    'tour_rep': 0,
+                    'repos_med': 0,
+                    'sans_ph': 0
+                }
+            
+            # Stocker les statuts de présence par date
+            present_val = int(r[12] or 0)
+            absent_val = int(r[13] or 0)
+            cong_val = int(r[14] or 0)
+            tour_rep_val = int(r[15] or 0)
+            repos_med_val = int(r[16] or 0)
+            sans_ph_val = int(r[17] or 0)
+            
+            employees_data[matricule]['attendances'][date_obj] = {
+                'present': present_val,
+                'absent': absent_val,
+                'cong': cong_val,
+                'tour_rep': tour_rep_val,
+                'repos_med': repos_med_val,
+                'sans_ph': sans_ph_val
+            }
+            
+            # Mettre à jour les totaux
+            employee_totals[matricule]['present'] += present_val
+            employee_totals[matricule]['absent'] += absent_val
+            employee_totals[matricule]['cong'] += cong_val
+            employee_totals[matricule]['tour_rep'] += tour_rep_val
+            employee_totals[matricule]['repos_med'] += repos_med_val
+            employee_totals[matricule]['sans_ph'] += sans_ph_val
+
+        # Trier les dates
+        sorted_dates = sorted(list(dates_set))
+        
+        # Créer les données pour le DataFrame
+        columns_data = []
+        
+        # Colonnes fixes (avec les nouvelles colonnes)
+        fixed_columns = ['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire', 'Classe', 'Affectation', 'Ville', 'Taux Logement', 'Taux Repas']
+        
+        # Préparer les données pour chaque employé
+        for emp_data in employees_data.values():
+            matricule = emp_data['matricule']
+            row_data = [
+                emp_data['matricule'],
+                emp_data['nom'],
+                emp_data['prenom'],
+                emp_data['poste'],
+                emp_data['site'],
+                emp_data['affaire'],
+                emp_data['classe'],
+                emp_data['affectation'],
+                emp_data['ville'],
+                emp_data['taux_lgt'],
+                emp_data['taux_repas']
+            ]
+            
+            # Ajouter les statuts pour chaque date
+            for date_obj in sorted_dates:
+                attendance = emp_data['attendances'].get(date_obj, {})
+                row_data.extend([
+                    attendance.get('present', 0),
+                    attendance.get('absent', 0),
+                    attendance.get('cong', 0),
+                    attendance.get('tour_rep', 0),
+                    attendance.get('repos_med', 0),
+                    attendance.get('sans_ph', 0)
+                ])
+            
+            # Ajouter les totaux à la fin
+            totals = employee_totals[matricule]
+            row_data.extend([
+                totals['present'],
+                totals['absent'],
+                totals['cong'],
+                totals['tour_rep'],
+                totals['repos_med'],
+                totals['sans_ph']
+            ])
+            
+            columns_data.append(row_data)
+        
+        # Construire les en-têtes
+        first_header = fixed_columns.copy()
+        second_header = [''] * len(fixed_columns)
+        
+        # Couleurs pour les dates (cycle jaune, vert, bleu)
+        date_colors = [
+            PatternFill(start_color='FFFF99', end_color='FFFF99', fill_type='solid'),  # Jaune clair
+            PatternFill(start_color='CCFFCC', end_color='CCFFCC', fill_type='solid'),  # Vert clair
+            PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')   # Bleu clair
+        ]
+        
+        # En-têtes pour les totaux
+        total_headers_first = ['RÉCAPITULATIF'] * 6
+        total_headers_second = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
+        
+        # Compter le nombre de colonnes pour chaque date (6 statuts)
+        date_info = []
+        color_index = 0
+        
+        for date_obj in sorted_dates:
+            date_str = date_obj.strftime('%d/%m/%Y')
+            first_header.extend([date_str] * 6)
+            second_header.extend(['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph'])
+            
+            # Stocker les informations de couleur et de position pour chaque date
+            date_info.append({
+                'date_str': date_str,
+                'start_col': len(first_header) - 5,  # Position de départ (1-based)
+                'color': date_colors[color_index % len(date_colors)]
             })
-
-        detail_df = pd.DataFrame(detail_data)
-        out_path = os.path.join(app.config['EXPORT_FOLDER'], f'recap_{datetime.now().strftime("%Y%m%d%H%M%S")}.xlsx')
-
-        with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-            if not detail_df.empty:
-                detail_df.to_excel(writer, sheet_name='Détails', index=False)
-            else:
-                pd.DataFrame(columns=['Date', 'Matricule']).to_excel(writer, sheet_name='Détails', index=False)
-
-            recap_df.to_excel(writer, sheet_name='Récap', index=False)
+            color_index += 1
+        
+        # Ajouter les en-têtes de récapitulatif
+        first_header.extend(total_headers_first)
+        second_header.extend(total_headers_second)
+        
+        # Chemin du fichier d'export
+        out_path = os.path.join(app.config['EXPORT_FOLDER'], f'export_presence_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx')
+        
+        # Créer le fichier Excel manuellement avec openpyxl
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.title = 'Feuille1'
+        
+        # Écrire la première ligne d'en-tête (dates fusionnées)
+        col_num = 1
+        # Colonnes fixes
+        for header in fixed_columns:
+            worksheet.cell(row=1, column=col_num, value=header)
+            col_num += 1
+        
+        # Colonnes de dates fusionnées
+        current_col = col_num
+        date_color_map = {}
+        
+        for i, date_obj in enumerate(sorted_dates):
+            date_str = date_obj.strftime('%d/%m/%Y')
+            start_col = current_col
+            end_col = current_col + 5  # 6 colonnes - 1 (index 0-based)
+            
+            # Fusionner les cellules pour la date
+            worksheet.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=end_col)
+            
+            # Écrire la date au centre de la cellule fusionnée
+            cell = worksheet.cell(row=1, column=start_col, value=date_str)
+            
+            # Stocker la position et la couleur pour cette date
+            date_color_map[(start_col, end_col)] = date_colors[i % len(date_colors)]
+            
+            current_col = end_col + 1
+        
+        # Colonnes de récapitulatif fusionnées
+        recap_start_col = current_col
+        recap_end_col = current_col + 5
+        worksheet.merge_cells(start_row=1, start_column=recap_start_col, end_row=1, end_column=recap_end_col)
+        worksheet.cell(row=1, column=recap_start_col, value='RÉCAPITULATIF')
+        
+        # Écrire la deuxième ligne d'en-tête (statuts)
+        col_num = 1
+        # Colonnes fixes (vide pour la deuxième ligne)
+        for header in fixed_columns:
+            worksheet.cell(row=2, column=col_num, value='')
+            col_num += 1
+        
+        # Statuts pour chaque date
+        for date_obj in sorted_dates:
+            statuts = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
+            for statut in statuts:
+                worksheet.cell(row=2, column=col_num, value=statut)
+                col_num += 1
+        
+        # Statuts pour le récapitulatif
+        statuts_recap = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
+        for statut in statuts_recap:
+            worksheet.cell(row=2, column=col_num, value=statut)
+            col_num += 1
+        
+        # Écrire les données
+        for row_num, row_data in enumerate(columns_data, 3):  # Commencer à la ligne 3
+            for col_num, value in enumerate(row_data, 1):
+                worksheet.cell(row=row_num, column=col_num, value=value)
+        
+        # Appliquer le style aux en-têtes
+        header_fill = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
+        header_font = Font(bold=True, size=11)
+        thin_border = Border(
+            left=Side(style='thin'), 
+            right=Side(style='thin'), 
+            top=Side(style='thin'), 
+            bottom=Side(style='thin')
+        )
+        center_alignment = Alignment(horizontal='center', vertical='center')
+        
+        # Appliquer le style à la première ligne d'en-tête
+        for col_num in range(1, len(first_header) + 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.border = thin_border
+            cell.alignment = center_alignment
+        
+        # Appliquer le style à la deuxième ligne d'en-tête
+        for col_num in range(1, len(second_header) + 1):
+            cell = worksheet.cell(row=2, column=col_num)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.border = thin_border
+            cell.alignment = center_alignment
+        
+        # Appliquer les couleurs aux dates fusionnées
+        for (start_col, end_col), color_fill in date_color_map.items():
+            for col_num in range(start_col, end_col + 1):
+                cell = worksheet.cell(row=1, column=col_num)
+                cell.fill = color_fill
+                # Appliquer aussi la couleur aux en-têtes de statuts de cette date
+                statut_cell = worksheet.cell(row=2, column=col_num)
+                statut_cell.fill = color_fill
+        
+        # Appliquer une couleur différente pour le récapitulatif
+        recap_color = PatternFill(start_color='FFCC99', end_color='FFCC99', fill_type='solid')  # Orange clair
+        for col_num in range(recap_start_col, recap_end_col + 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.fill = recap_color
+            statut_cell = worksheet.cell(row=2, column=col_num)
+            statut_cell.fill = recap_color
+        
+        # Ajuster la largeur des colonnes automatiquement
+        for col_num in range(1, len(first_header) + 1):
+            max_length = 0
+            column_letter = get_column_letter(col_num)
+            for row_num in range(1, worksheet.max_row + 1):
+                cell = worksheet.cell(row=row_num, column=col_num)
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 15)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        # Sauvegarder le fichier
+        workbook.save(out_path)
 
         return send_file(out_path, as_attachment=True, download_name=os.path.basename(out_path))
 
@@ -136,39 +381,62 @@ def create_app():
 
 
 # -------------------------
-# Fonctions utilitaires
+# Fonctions utilitaires (avec nouvelles colonnes)
 # -------------------------
 
 def _normalize(s: str) -> str:
-    """Normalise une chaîne de caractères pour la comparaison des en-têtes de colonnes."""
+    """Normalise une chaîne pour comparaison d'en-têtes."""
     if s is None:
         return ''
-    # Supprime les caractères non alphanumériques (y compris les espaces)
-    return re.sub(r'[^A-Za-z0-9éàèêôùïçÉÀÈ]', '', str(s)).strip().lower()
+    return re.sub(r'[^A-Za-z0-9éèêàôùïçÉÀÈ]', '', str(s)).strip().lower()
 
 
 def _is_date_string(s: str) -> bool:
-    """Vérifie si la chaîne correspond au format de date jj/mm/aaaa."""
+    """Detecte jj/mm/yyyy (ou j/m/yyyy)."""
     if not s:
         return False
     s = str(s).strip()
-    # Accepte jj/mm/aaaa ou j/m/aaaa
     return bool(re.match(r'^\d{1,2}\/\d{1,2}\/\d{4}$', s))
 
 
 def process_upload(path: str) -> int:
     """
-    Lit un fichier Excel à double en-tête (header=[0,1]) où les dates sont en première ligne
-    et les sous-colonnes (Présent, Absent, ...) en seconde ligne.
+    Lit un fichier Excel avec double en-tête (header=[0,1]) où la ligne 1 contient
+    les dates (fusionnées en Excel) et la ligne 2 contient les statuts (Présent/Absent/...).
     Insère / met à jour les attendances.
     Retourne le nombre d'enregistrements d'attendance traités.
     """
-    # Lecture en multi-index header (lignes 0 et 1)
-    df = pd.read_excel(path, header=[0, 1], engine='openpyxl')
-    # S'assurer que les noms de colonnes sont strings pour la cohérence
-    df.columns = [(str(a).strip(), str(b).strip()) for a, b in df.columns]
+    # Lecture en header multi-index
+    try:
+        df = pd.read_excel(path, header=[0, 1], engine='openpyxl')
+    except Exception:
+        # fallback : lecture simple
+        df = pd.read_excel(path, engine='openpyxl')
 
-    # Définition des variantes canoniques pour les colonnes fixes
+    # Convertir tuples en listes manipulables
+    # pandas peut renvoyer des MultiIndex dont certains 'top' sont NaN ou 'Unnamed'
+    cols = list(df.columns)
+
+    # normaliser tous les éléments en str et forward-fill le niveau "top" si vide
+    top_level = []
+    bottom_level = []
+    last_top = None
+    for a, b in cols:
+        a_s = str(a).strip() if a is not None else ''
+        b_s = str(b).strip() if b is not None else ''
+        # consider pandas "Unnamed" or empty as blank
+        if a_s == '' or a_s.lower().startswith('unnamed') or a_s.lower() == 'nan':
+            a_s = last_top or ''
+        else:
+            last_top = a_s
+        top_level.append(a_s)
+        bottom_level.append(b_s)
+
+    # rebuild MultiIndex labels as tuples (top, bottom)
+    new_cols = [(top_level[i], bottom_level[i]) for i in range(len(top_level))]
+    df.columns = pd.MultiIndex.from_tuples(new_cols)
+
+    # canonical fixed columns and variants (avec nouvelles colonnes)
     canonical_fixed = {
         'matricule': ['matricule', 'id'],
         'nom': ['nom', 'name'],
@@ -176,43 +444,63 @@ def process_upload(path: str) -> int:
         'poste': ['poste', 'position'],
         'site': ['site'],
         'affaire': ['affaire'],
+        'classe': ['classe', 'class', 'niveau'],
+        'affectation': ['affectation', 'affect', 'assignment'],
+        'ville': ['ville', 'city'],
         'taux_logement': ['tauxlogement', 'taux_logement', 'taux_lgt', 'taux logement', 'tauxlgt'],
-        'taux_repas': ['tauxrepas', 'taux_repas', 'taux repas']
+        'taux_repas': ['tauxrepas', 'taux_repas', 'taux repas', 'tauxrep']
     }
 
-    # Identification des colonnes fixes dans le DataFrame
+    # find fixed columns (they may be in top or bottom depending on how template was made)
     fixed_map = {}
     for col in df.columns:
-        a, b = col
-        a_n = _normalize(a)
-        b_n = _normalize(b)
+        top, bot = col
+        top_n = _normalize(top)
+        bot_n = _normalize(bot)
         for canon, variants in canonical_fixed.items():
-            # Une correspondance est trouvée si le nom normalisé de l'un des deux niveaux
-            # correspond à une variante canonique
-            if a_n in variants or b_n in variants:
+            if top_n in variants or bot_n in variants:
                 fixed_map[canon] = col
+                break
 
-    # Identification des colonnes de date / statut
-    # La structure de l'image (Date en niveau 0, Statut en niveau 1) est gérée ici.
+    # Build date_columns: mapping date_str -> {status_label: column_tuple}
     date_columns = {}
     for col in df.columns:
-        a, b = col # a = niveau 0 (Date), b = niveau 1 (Statut)
-        if _is_date_string(a):
-            date_str = a.strip()
-            status = b.strip() or ''
+        top, bot = col
+        if _is_date_string(top):
+            date_str = top.strip()
+            status = bot.strip() or ''
+            date_columns.setdefault(date_str, {})[status] = col
+        # fallback: sometimes date is in bottom row
+        elif _is_date_string(bot):
+            date_str = bot.strip()
+            status = top.strip() or ''
             date_columns.setdefault(date_str, {})[status] = col
 
-    # Si aucune date n'est trouvée au niveau 0, on essaie au niveau 1 (cas moins fréquent)
+    # If no date columns found, try to detect top that look numeric date-like without slash (rare)
     if not date_columns:
         for col in df.columns:
-            a, b = col
-            if _is_date_string(b):
-                date_str = b.strip()
-                status = a.strip() or ''
-                date_columns.setdefault(date_str, {})[status] = col
+            top, bot = col
+            # try parse common formats (yyyy-mm-dd etc)
+            for candidate in (top, bot):
+                s = str(candidate).strip()
+                try:
+                    parsed = pd.to_datetime(s, dayfirst=True, errors='coerce')
+                    if not pd.isna(parsed):
+                        date_str = parsed.strftime('%d/%m/%Y')
+                        status = bot.strip() if candidate == top else top.strip()
+                        date_columns.setdefault(date_str, {})[status] = col
+                        break
+                except Exception:
+                    pass
+
+    # DEBUG: if you need to inspect found columns, uncomment:
+    # print("Fixed map:", fixed_map)
+    # print("Date columns:", date_columns.keys())
 
     rows_processed = 0
-    with db.session.begin():
+
+    # DB transaction: we'll commit at end (explicitly)
+    try:
         for idx, row in df.iterrows():
             # 1. Identification de l'employé par Matricule
             matricule = None
@@ -228,14 +516,15 @@ def process_upload(path: str) -> int:
             if not matricule:
                 continue
 
+            # find or create employee
             emp = Employee.query.filter_by(matricule=matricule).first()
             if not emp:
                 emp = Employee(matricule=matricule)
                 db.session.add(emp)
                 db.session.flush()
 
-            # 2. Mise à jour des informations fixes de l'employé
-            for key in ('nom', 'prenom', 'poste', 'site', 'affaire'):
+            # 2. Mise à jour des informations fixes de l'employé (avec nouvelles colonnes)
+            for key in ('nom', 'prenom', 'poste', 'site', 'affaire', 'classe', 'affectation', 'ville'):
                 if key in fixed_map:
                     val = row[fixed_map[key]]
                     if pd.notna(val):
@@ -249,22 +538,15 @@ def process_upload(path: str) -> int:
                 try:
                     val = row[fixed_map['taux_logement']]
                     if pd.notna(val):
-                        v = float(val)
-                        # Le code tente de mettre à jour taux_lgt ou taux_logement
-                        if hasattr(emp, 'taux_lgt'):
-                            setattr(emp, 'taux_lgt', v)
-                        elif hasattr(emp, 'taux_logement'):
-                            setattr(emp, 'taux_logement', v)
+                        emp.taux_lgt = float(val)
                 except Exception:
+                    # ignore bad conversion
                     pass
-
             if 'taux_repas' in fixed_map:
                 try:
                     val = row[fixed_map['taux_repas']]
                     if pd.notna(val):
-                        v = float(val)
-                        if hasattr(emp, 'taux_repas'):
-                            setattr(emp, 'taux_repas', v)
+                        emp.taux_repas = float(val)
                 except Exception:
                     pass
 
@@ -273,8 +555,10 @@ def process_upload(path: str) -> int:
                 try:
                     date_obj = datetime.strptime(date_str, '%d/%m/%Y').date()
                 except Exception:
+                    # if parse fails skip this date
                     continue
 
+                # status flags
                 present_flag = 0
                 absent_flag = 0
                 cong_flag = 0
@@ -282,33 +566,24 @@ def process_upload(path: str) -> int:
                 repos_flag = 0
                 sansph_flag = 0
 
-                # HELPER CORRIGÉ: Teste si une cellule indique une présence/un statut
                 def cell_true(val):
-                    """Vérifie si la valeur de la cellule indique un statut positif (Présent, Absent, X, 1, 1.0, etc.)."""
                     if pd.isna(val):
                         return False
-                    
-                    # CORRECTION: Si c'est un nombre (int ou float, comme 1.0), vérifiez s'il est > 0
                     if isinstance(val, (int, float)):
-                        return val > 0
-                    
-                    # Sinon, traitez-le comme une chaîne
+                        return val != 0
                     s = str(val).strip().lower()
                     if not s:
                         return False
-                    
-                    # Correspondance avec les indicateurs courants ('x', '1', 'yes', 'p', etc.)
-                    return s in ('x', '1', 'yes', 'y', 'présent', 'present', 'p') or re.match(r'^\d+$', s) and int(s) > 0
+                    return s in ('x', '1', 'yes', 'y', 'présent', 'present', 'p') or (s.isdigit() and int(s) != 0)
 
-
-                # Vérification des statuts en utilisant la clé du niveau 1 de l'en-tête (ex: 'Présent', 'Absent', 'Repos médica')
+                # read each status cell for the date
                 for status_label, colkey in status_map.items():
-                    sval = row[colkey]
-                    
-                    if pd.notna(sval) and cell_true(sval):
-                        sn = status_label.strip().lower()
-                        
-                        # Correspondance souple avec les labels
+                    try:
+                        sval = row[colkey]
+                    except Exception:
+                        sval = None
+                    if cell_true(sval):
+                        sn = str(status_label).strip().lower()
                         if 'prés' in sn or 'present' in sn:
                             present_flag = 1
                         elif 'abs' in sn:
@@ -322,36 +597,47 @@ def process_upload(path: str) -> int:
                         elif 'sans' in sn and 'ph' in sn:
                             sansph_flag = 1
 
-                # Si aucun statut n'est marqué pour cette date, on passe
+                # skip if no status flagged
                 if (present_flag + absent_flag + cong_flag + tourrep_flag + repos_flag + sansph_flag) == 0:
                     continue
 
-                # 4. Insertion / Mise à jour de l'attendance (upsert)
+                # upsert attendance row (employee_id + date)
                 att = Attendance.query.filter_by(employee_id=emp.id, date=date_obj).first()
                 if not att:
-                    att = Attendance(employee_id=emp.id, date=date_obj,
-                                     present=present_flag, absent=absent_flag, cong=cong_flag,
-                                     tour_rep=tourrep_flag, repos_med=repos_flag, sans_ph=sansph_flag)
+                    att = Attendance(
+                        employee_id=emp.id,
+                        date=date_obj,
+                        present=present_flag,
+                        absent=absent_flag,
+                        cong=cong_flag,
+                        tour_rep=tourrep_flag,
+                        repos_med=repos_flag,
+                        sans_ph=sansph_flag
+                    )
                     db.session.add(att)
                 else:
-                    # OR-combine les marques existantes et nouvelles (priorité à 1 si déjà 1)
-                    att.present = max(att.present, present_flag)
-                    att.absent = max(att.absent, absent_flag)
-                    att.cong = max(att.cong, cong_flag)
-                    att.tour_rep = max(att.tour_rep, tourrep_flag)
-                    att.repos_med = max(att.repos_med, repos_flag)
-                    att.sans_ph = max(att.sans_ph, sansph_flag)
+                    # replace with new values (user imports explicit statuses)
+                    att.present = present_flag
+                    att.absent = absent_flag
+                    att.cong = cong_flag
+                    att.tour_rep = tourrep_flag
+                    att.repos_med = repos_flag
+                    att.sans_ph = sansph_flag
 
                 rows_processed += 1
+
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        raise Exception(f"Erreur lors du traitement des données: {e}")
 
     return rows_processed
 
 
 def build_recap(start_date=None, end_date=None):
-    """Construit le DataFrame de récapitulatif des présences par employé."""
     q = Attendance.query.join(Employee).with_entities(
         Employee.matricule, Employee.nom, Employee.prenom, Employee.poste,
-        Employee.site, Employee.affaire,
+        Employee.site, Employee.affaire, Employee.classe, Employee.affectation, Employee.ville,
         db.func.sum(Attendance.present).label('Présent'),
         db.func.sum(Attendance.absent).label('Absent'),
         db.func.sum(Attendance.cong).label('CONG'),
@@ -368,7 +654,6 @@ def build_recap(start_date=None, end_date=None):
     rows = q.all()
     if not rows:
         return pd.DataFrame()
-
     data = []
     for r in rows:
         data.append({
@@ -378,12 +663,15 @@ def build_recap(start_date=None, end_date=None):
             'Poste': r[3] or '',
             'Site': r[4] or '',
             'Affaire': r[5] or '',
-            'Présent': int(r[6] or 0),
-            'Absent': int(r[7] or 0),
-            'CONG': int(r[8] or 0),
-            'Tour_rep': int(r[9] or 0),
-            'Repos_med': int(r[10] or 0),
-            'Sans_ph': int(r[11] or 0)
+            'Classe': r[6] or '',
+            'Affectation': r[7] or '',
+            'Ville': r[8] or '',
+            'Présent': int(r[9] or 0),
+            'Absent': int(r[10] or 0),
+            'CONG': int(r[11] or 0),
+            'Tour_rep': int(r[12] or 0),
+            'Repos_med': int(r[13] or 0),
+            'Sans_ph': int(r[14] or 0)
         })
     return pd.DataFrame(data)
 
@@ -391,3 +679,4 @@ def build_recap(start_date=None, end_date=None):
 if __name__ == '__main__':
     app = create_app()
     app.run(debug=True)
+

@@ -12,15 +12,11 @@ class Employee(db.Model):
     poste = db.Column(db.String(128))
     site = db.Column(db.String(128))
     affaire = db.Column(db.String(128))
-
-    # nouvelles colonnes demandées
     classe = db.Column(db.String(50))
     affectation = db.Column(db.String(100))
     ville = db.Column(db.String(100))
-
-    # taux statiques (float)
-    taux_lgt = db.Column(db.Float, default=0.0)   # "taux logement"
-    taux_repas = db.Column(db.Float, default=0.0) # "taux repas"
+    taux_lgt = db.Column(db.Float, default=0.0)   
+    taux_repas = db.Column(db.Float, default=0.0) 
 
     attendances = db.relationship('Attendance', back_populates='employee', cascade='all, delete-orphan')
 

@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from flask import Flask, render_template, request, redirect, url_for, send_file, flash
 from flask_migrate import Migrate
 from werkzeug.utils import secure_filename
@@ -78,6 +78,10 @@ def create_app():
         except Exception:
             start_date = end_date = None
 
+        if not start_date or not end_date:
+            flash('Plage de dates invalide', 'warning')
+            return redirect(url_for('index'))
+
         # Récupérer les données détaillées
         q = Attendance.query.join(Employee)
         if start_date:
@@ -94,49 +98,60 @@ def create_app():
             Attendance.tour_rep, Attendance.repos_med, Attendance.sans_ph
         ).order_by(Employee.matricule.asc(), Attendance.date.asc()).all()
 
-        if not rows:
-            flash('Aucune donnée à exporter', 'warning')
+        # Récupérer tous les employés (même ceux sans données dans la plage)
+        all_employees = Employee.query.order_by(Employee.matricule.asc()).all()
+
+        if not all_employees:
+            flash('Aucun employé trouvé', 'warning')
             return redirect(url_for('index'))
 
-        # Préparer les données pour l'export au même format que l'import
-        employees_data = {}
+        # Créer toutes les dates de la plage
         dates_set = set()
+        current_date = start_date
+        while current_date <= end_date:
+            dates_set.add(current_date)
+            current_date += timedelta(days=1)
         
-        # Calculer les totaux par employé
+        sorted_dates = sorted(list(dates_set))
+
+        # Préparer les données pour l'export
+        employees_data = {}
         employee_totals = {}
         
+        # Initialiser avec tous les employés
+        for emp in all_employees:
+            employees_data[emp.matricule] = {
+                'matricule': emp.matricule,
+                'nom': emp.nom or '',
+                'prenom': emp.prenom or '',
+                'poste': emp.poste or '',
+                'site': emp.site or '',
+                'affaire': emp.affaire or '',
+                'classe': emp.classe or '',
+                'affectation': emp.affectation or '',
+                'ville': emp.ville or '',
+                'taux_lgt': emp.taux_lgt or 0.0,
+                'taux_repas': emp.taux_repas or 0.0,
+                'attendances': {}
+            }
+            
+            employee_totals[emp.matricule] = {
+                'present': 0,
+                'absent': 0,
+                'cong': 0,
+                'tour_rep': 0,
+                'repos_med': 0,
+                'sans_ph': 0
+            }
+
+        # Remplir avec les données existantes
         for r in rows:
             matricule = r[1]
             date_obj = r[0]
-            dates_set.add(date_obj)
             
             if matricule not in employees_data:
-                employees_data[matricule] = {
-                    'matricule': matricule,
-                    'nom': r[2] or '',
-                    'prenom': r[3] or '',
-                    'poste': r[4] or '',
-                    'site': r[5] or '',
-                    'affaire': r[6] or '',
-                    'classe': r[7] or '',
-                    'affectation': r[8] or '',
-                    'ville': r[9] or '',
-                    'taux_lgt': r[10] or 0.0,
-                    'taux_repas': r[11] or 0.0,
-                    'attendances': {}
-                }
+                continue
                 
-                # Initialiser les totaux pour cet employé
-                employee_totals[matricule] = {
-                    'present': 0,
-                    'absent': 0,
-                    'cong': 0,
-                    'tour_rep': 0,
-                    'repos_med': 0,
-                    'sans_ph': 0
-                }
-            
-            # Stocker les statuts de présence par date
             present_val = int(r[12] or 0)
             absent_val = int(r[13] or 0)
             cong_val = int(r[14] or 0)
@@ -161,14 +176,22 @@ def create_app():
             employee_totals[matricule]['repos_med'] += repos_med_val
             employee_totals[matricule]['sans_ph'] += sans_ph_val
 
-        # Trier les dates
-        sorted_dates = sorted(list(dates_set))
+        # Construire les en-têtes
+        fixed_columns = ['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire', 'Classe', 'Affectation', 'Ville', 'Taux Logement', 'Taux Repas']
+        
+        # Couleurs pour les dates (cycle jaune, vert, bleu)
+        date_colors = [
+            PatternFill(start_color='FFFF99', end_color='FFFF99', fill_type='solid'),  # Jaune clair
+            PatternFill(start_color='CCFFCC', end_color='CCFFCC', fill_type='solid'),  # Vert clair
+            PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')   # Bleu clair
+        ]
+        
+        # En-têtes pour les totaux
+        total_headers_first = ['RÉCAPITULATIF'] * 6
+        total_headers_second = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
         
         # Créer les données pour le DataFrame
         columns_data = []
-        
-        # Colonnes fixes (avec les nouvelles colonnes)
-        fixed_columns = ['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire', 'Classe', 'Affectation', 'Ville', 'Taux Logement', 'Taux Repas']
         
         # Préparer les données pour chaque employé
         for emp_data in employees_data.values():
@@ -187,7 +210,7 @@ def create_app():
                 emp_data['taux_repas']
             ]
             
-            # Ajouter les statuts pour chaque date
+            # Ajouter les statuts pour chaque date (même les dates sans données = 0)
             for date_obj in sorted_dates:
                 attendance = emp_data['attendances'].get(date_obj, {})
                 row_data.extend([
@@ -212,20 +235,9 @@ def create_app():
             
             columns_data.append(row_data)
         
-        # Construire les en-têtes
+        # Construire les en-têtes complets
         first_header = fixed_columns.copy()
         second_header = [''] * len(fixed_columns)
-        
-        # Couleurs pour les dates (cycle jaune, vert, bleu)
-        date_colors = [
-            PatternFill(start_color='FFFF99', end_color='FFFF99', fill_type='solid'),  # Jaune clair
-            PatternFill(start_color='CCFFCC', end_color='CCFFCC', fill_type='solid'),  # Vert clair
-            PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')   # Bleu clair
-        ]
-        
-        # En-têtes pour les totaux
-        total_headers_first = ['RÉCAPITULATIF'] * 6
-        total_headers_second = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
         
         # Compter le nombre de colonnes pour chaque date (6 statuts)
         date_info = []
@@ -239,7 +251,7 @@ def create_app():
             # Stocker les informations de couleur et de position pour chaque date
             date_info.append({
                 'date_str': date_str,
-                'start_col': len(first_header) - 5,  # Position de départ (1-based)
+                'start_col': len(first_header) - 5,
                 'color': date_colors[color_index % len(date_colors)]
             })
             color_index += 1
@@ -248,17 +260,13 @@ def create_app():
         first_header.extend(total_headers_first)
         second_header.extend(total_headers_second)
         
-       # Chemin du fichier d'export avec plage de dates
-        start = request.args.get('start')
-        end = request.args.get('end')
-
-        # Formater les dates pour le nom de fichier (remplacer '/' par '-')
-        start_str = start.replace('/', '-') if start else datetime.now().strftime('%d-%m-%Y')
-        end_str = end.replace('/', '-') if end else datetime.now().strftime('%d-%m-%Y')
+        # Chemin du fichier d'export avec plage de dates
+        start_str = start.replace('-', '-') if start else datetime.now().strftime('%d-%m-%Y')
+        end_str = end.replace('-', '-') if end else datetime.now().strftime('%d-%m-%Y')
 
         out_path = os.path.join(
             app.config['EXPORT_FOLDER'],
-            f'presence_{start_str}_{end_str}.xlsx'
+            f'presence_{start_str}_a_{end_str}.xlsx'
         )
         
         # Créer le fichier Excel manuellement avec openpyxl
@@ -391,7 +399,7 @@ def create_app():
 
 
 # -------------------------
-# Fonctions utilitaires (avec nouvelles colonnes)
+# Fonctions utilitaires
 # -------------------------
 
 def _normalize(s: str) -> str:
@@ -424,7 +432,6 @@ def process_upload(path: str) -> int:
         df = pd.read_excel(path, engine='openpyxl')
 
     # Convertir tuples en listes manipulables
-    # pandas peut renvoyer des MultiIndex dont certains 'top' sont NaN ou 'Unnamed'
     cols = list(df.columns)
 
     # normaliser tous les éléments en str et forward-fill le niveau "top" si vide
@@ -446,7 +453,7 @@ def process_upload(path: str) -> int:
     new_cols = [(top_level[i], bottom_level[i]) for i in range(len(top_level))]
     df.columns = pd.MultiIndex.from_tuples(new_cols)
 
-    # canonical fixed columns and variants (avec nouvelles colonnes)
+    # canonical fixed columns and variants
     canonical_fixed = {
         'matricule': ['matricule', 'id'],
         'nom': ['nom', 'name'],
@@ -503,10 +510,6 @@ def process_upload(path: str) -> int:
                 except Exception:
                     pass
 
-    # DEBUG: if you need to inspect found columns, uncomment:
-    # print("Fixed map:", fixed_map)
-    # print("Date columns:", date_columns.keys())
-
     rows_processed = 0
 
     # DB transaction: we'll commit at end (explicitly)
@@ -533,7 +536,7 @@ def process_upload(path: str) -> int:
                 db.session.add(emp)
                 db.session.flush()
 
-            # 2. Mise à jour des informations fixes de l'employé (avec nouvelles colonnes)
+            # 2. Mise à jour des informations fixes de l'employé
             for key in ('nom', 'prenom', 'poste', 'site', 'affaire', 'classe', 'affectation', 'ville'):
                 if key in fixed_map:
                     val = row[fixed_map[key]]
@@ -645,25 +648,43 @@ def process_upload(path: str) -> int:
 
 
 def build_recap(start_date=None, end_date=None):
-    q = Attendance.query.join(Employee).with_entities(
-        Employee.matricule, Employee.nom, Employee.prenom, Employee.poste,
-        Employee.site, Employee.affaire, Employee.classe, Employee.affectation, Employee.ville,
-        db.func.sum(Attendance.present).label('Présent'),
-        db.func.sum(Attendance.absent).label('Absent'),
-        db.func.sum(Attendance.cong).label('CONG'),
-        db.func.sum(Attendance.tour_rep).label('Tour_rep'),
-        db.func.sum(Attendance.repos_med).label('Repos_med'),
-        db.func.sum(Attendance.sans_ph).label('Sans_ph')
-    ).group_by(Employee.id)
+    """
+    Retourne un DataFrame récapitulatif par employé (totaux) pour la plage fournie (inclusive).
+    Colonnes : Matricule, Nom, Prénom, Poste, Site, Affaire, Classe, Affectation, Ville,
+              Présent, Absent, CONG, Tour_rep, Repos_med, Sans_ph
+    """
+    q = Attendance.query.join(Employee)
 
     if start_date:
         q = q.filter(Attendance.date >= start_date)
     if end_date:
         q = q.filter(Attendance.date <= end_date)
 
+    # Aggregation par employé
+    q = q.with_entities(
+        Employee.matricule,
+        Employee.nom,
+        Employee.prenom,
+        Employee.poste,
+        Employee.site,
+        Employee.affaire,
+        Employee.classe,
+        Employee.affectation,
+        Employee.ville,
+        db.func.coalesce(db.func.sum(Attendance.present), 0).label('Présent'),
+        db.func.coalesce(db.func.sum(Attendance.absent), 0).label('Absent'),
+        db.func.coalesce(db.func.sum(Attendance.cong), 0).label('CONG'),
+        db.func.coalesce(db.func.sum(Attendance.tour_rep), 0).label('Tour_rep'),
+        db.func.coalesce(db.func.sum(Attendance.repos_med), 0).label('Repos_med'),
+        db.func.coalesce(db.func.sum(Attendance.sans_ph), 0).label('Sans_ph')
+    ).group_by(Employee.id, Employee.matricule, Employee.nom, Employee.prenom, Employee.poste,
+               Employee.site, Employee.affaire, Employee.classe, Employee.affectation, Employee.ville
+    ).order_by(Employee.matricule.asc())
+
     rows = q.all()
     if not rows:
         return pd.DataFrame()
+
     data = []
     for r in rows:
         data.append({
@@ -683,10 +704,11 @@ def build_recap(start_date=None, end_date=None):
             'Repos_med': int(r[13] or 0),
             'Sans_ph': int(r[14] or 0)
         })
-    return pd.DataFrame(data)
+
+    df = pd.DataFrame(data)
+    return df
 
 
 if __name__ == '__main__':
     app = create_app()
     app.run(debug=True)
-

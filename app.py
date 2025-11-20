@@ -82,12 +82,11 @@ def create_app():
             flash('Plage de dates invalide', 'warning')
             return redirect(url_for('index'))
 
-        # Récupérer les données détaillées
-        q = Attendance.query.join(Employee)
-        if start_date:
-            q = q.filter(Attendance.date >= start_date)
-        if end_date:
-            q = q.filter(Attendance.date <= end_date)
+        # Récupérer les données détaillées avec la plage de dates
+        q = Attendance.query.join(Employee).filter(
+            Attendance.date >= start_date,
+            Attendance.date <= end_date
+        )
 
         rows = q.with_entities(
             Attendance.date,
@@ -240,20 +239,12 @@ def create_app():
         second_header = [''] * len(fixed_columns)
         
         # Compter le nombre de colonnes pour chaque date (6 statuts)
-        date_info = []
         color_index = 0
         
         for date_obj in sorted_dates:
             date_str = date_obj.strftime('%d/%m/%Y')
             first_header.extend([date_str] * 6)
             second_header.extend(['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph'])
-            
-            # Stocker les informations de couleur et de position pour chaque date
-            date_info.append({
-                'date_str': date_str,
-                'start_col': len(first_header) - 5,
-                'color': date_colors[color_index % len(date_colors)]
-            })
             color_index += 1
         
         # Ajouter les en-têtes de récapitulatif
@@ -417,6 +408,36 @@ def _is_date_string(s: str) -> bool:
     return bool(re.match(r'^\d{1,2}\/\d{1,2}\/\d{4}$', s))
 
 
+def _parse_date_flexible(date_str: str):
+    """Parse une date en essayant plusieurs formats."""
+    date_str = str(date_str).strip()
+    
+    # Formats à essayer
+    formats = [
+        '%d/%m/%Y',  # DD/MM/YYYY
+        '%m/%d/%Y',  # MM/DD/YYYY
+        '%Y-%m-%d',  # YYYY-MM-DD
+        '%d-%m-%Y',  # DD-MM-YYYY
+        '%m-%d-%Y',  # MM-DD-YYYY
+    ]
+    
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    
+    # Si aucun format ne fonctionne, essayer pandas
+    try:
+        parsed = pd.to_datetime(date_str, dayfirst=False, errors='coerce')
+        if not pd.isna(parsed):
+            return parsed.date()
+    except:
+        pass
+    
+    return None
+
+
 def process_upload(path: str) -> int:
     """
     Lit un fichier Excel avec double en-tête (header=[0,1]) où la ligne 1 contient
@@ -427,7 +448,8 @@ def process_upload(path: str) -> int:
     # Lecture en header multi-index
     try:
         df = pd.read_excel(path, header=[0, 1], engine='openpyxl')
-    except Exception:
+    except Exception as e:
+        print(f"DEBUG: Error reading with multi-index: {e}")
         # fallback : lecture simple
         df = pd.read_excel(path, engine='openpyxl')
 
@@ -483,32 +505,23 @@ def process_upload(path: str) -> int:
     date_columns = {}
     for col in df.columns:
         top, bot = col
-        if _is_date_string(top):
-            date_str = top.strip()
-            status = bot.strip() or ''
-            date_columns.setdefault(date_str, {})[status] = col
-        # fallback: sometimes date is in bottom row
-        elif _is_date_string(bot):
-            date_str = bot.strip()
-            status = top.strip() or ''
+        # Essayer de parser la date avec plusieurs formats
+        date_candidate = None
+        for candidate in (top, bot):
+            if candidate:
+                parsed_date = _parse_date_flexible(str(candidate))
+                if parsed_date:
+                    date_candidate = parsed_date
+                    # L'autre élément est le statut
+                    status_candidate = bot if candidate == top else top
+                    break
+        
+        if date_candidate:
+            date_str = date_candidate.strftime('%Y-%m-%d')  # Stocker en format standard
+            status = str(status_candidate).strip() if status_candidate else ''
             date_columns.setdefault(date_str, {})[status] = col
 
-    # If no date columns found, try to detect top that look numeric date-like without slash (rare)
-    if not date_columns:
-        for col in df.columns:
-            top, bot = col
-            # try parse common formats (yyyy-mm-dd etc)
-            for candidate in (top, bot):
-                s = str(candidate).strip()
-                try:
-                    parsed = pd.to_datetime(s, dayfirst=True, errors='coerce')
-                    if not pd.isna(parsed):
-                        date_str = parsed.strftime('%d/%m/%Y')
-                        status = bot.strip() if candidate == top else top.strip()
-                        date_columns.setdefault(date_str, {})[status] = col
-                        break
-                except Exception:
-                    pass
+    print(f"DEBUG: Found {len(date_columns)} date columns in import file: {list(date_columns.keys())}")
 
     rows_processed = 0
 
@@ -566,7 +579,8 @@ def process_upload(path: str) -> int:
             # 3. Parcours des dates et statuts (le cœur de l'import)
             for date_str, status_map in date_columns.items():
                 try:
-                    date_obj = datetime.strptime(date_str, '%d/%m/%Y').date()
+                    # date_str est déjà au format YYYY-MM-DD
+                    date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
                 except Exception:
                     # if parse fails skip this date
                     continue
@@ -593,22 +607,22 @@ def process_upload(path: str) -> int:
                 for status_label, colkey in status_map.items():
                     try:
                         sval = row[colkey]
+                        if cell_true(sval):
+                            sn = str(status_label).strip().lower()
+                            if 'prés' in sn or 'present' in sn:
+                                present_flag = 1
+                            elif 'abs' in sn:
+                                absent_flag = 1
+                            elif 'cong' in sn:
+                                cong_flag = 1
+                            elif 'tour' in sn and 'rep' in sn:
+                                tourrep_flag = 1
+                            elif 'repos' in sn or 'méd' in sn or 'med' in sn:
+                                repos_flag = 1
+                            elif 'sans' in sn and 'ph' in sn:
+                                sansph_flag = 1
                     except Exception:
-                        sval = None
-                    if cell_true(sval):
-                        sn = str(status_label).strip().lower()
-                        if 'prés' in sn or 'present' in sn:
-                            present_flag = 1
-                        elif 'abs' in sn:
-                            absent_flag = 1
-                        elif 'cong' in sn:
-                            cong_flag = 1
-                        elif 'tour' in sn and 'rep' in sn:
-                            tourrep_flag = 1
-                        elif 'repos' in sn or 'méd' in sn or 'med' in sn:
-                            repos_flag = 1
-                        elif 'sans' in sn and 'ph' in sn:
-                            sansph_flag = 1
+                        pass
 
                 # skip if no status flagged
                 if (present_flag + absent_flag + cong_flag + tourrep_flag + repos_flag + sansph_flag) == 0:
@@ -640,6 +654,7 @@ def process_upload(path: str) -> int:
                 rows_processed += 1
 
         db.session.commit()
+        print(f"DEBUG: Successfully processed {rows_processed} attendance records")
     except Exception as e:
         db.session.rollback()
         raise Exception(f"Erreur lors du traitement des données: {e}")

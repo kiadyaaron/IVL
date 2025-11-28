@@ -262,14 +262,16 @@ def create_app():
         
         # Créer le fichier Excel manuellement avec openpyxl
         workbook = openpyxl.Workbook()
-        worksheet = workbook.active
-        worksheet.title = 'Feuille1'
+        
+        # FEUILLE 1 : Présences détaillées (existante)
+        worksheet1 = workbook.active
+        worksheet1.title = 'Feuille1'
         
         # Écrire la première ligne d'en-tête (dates fusionnées)
         col_num = 1
         # Colonnes fixes
         for header in fixed_columns:
-            worksheet.cell(row=1, column=col_num, value=header)
+            worksheet1.cell(row=1, column=col_num, value=header)
             col_num += 1
         
         # Colonnes de dates fusionnées
@@ -282,10 +284,10 @@ def create_app():
             end_col = current_col + 5  # 6 colonnes - 1 (index 0-based)
             
             # Fusionner les cellules pour la date
-            worksheet.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=end_col)
+            worksheet1.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=end_col)
             
             # Écrire la date au centre de la cellule fusionnée
-            cell = worksheet.cell(row=1, column=start_col, value=date_str)
+            cell = worksheet1.cell(row=1, column=start_col, value=date_str)
             
             # Stocker la position et la couleur pour cette date
             date_color_map[(start_col, end_col)] = date_colors[i % len(date_colors)]
@@ -295,33 +297,33 @@ def create_app():
         # Colonnes de récapitulatif fusionnées
         recap_start_col = current_col
         recap_end_col = current_col + 5
-        worksheet.merge_cells(start_row=1, start_column=recap_start_col, end_row=1, end_column=recap_end_col)
-        worksheet.cell(row=1, column=recap_start_col, value='RÉCAPITULATIF')
+        worksheet1.merge_cells(start_row=1, start_column=recap_start_col, end_row=1, end_column=recap_end_col)
+        worksheet1.cell(row=1, column=recap_start_col, value='RÉCAPITULATIF')
         
         # Écrire la deuxième ligne d'en-tête (statuts)
         col_num = 1
         # Colonnes fixes (vide pour la deuxième ligne)
         for header in fixed_columns:
-            worksheet.cell(row=2, column=col_num, value='')
+            worksheet1.cell(row=2, column=col_num, value='')
             col_num += 1
         
         # Statuts pour chaque date
         for date_obj in sorted_dates:
             statuts = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
             for statut in statuts:
-                worksheet.cell(row=2, column=col_num, value=statut)
+                worksheet1.cell(row=2, column=col_num, value=statut)
                 col_num += 1
         
         # Statuts pour le récapitulatif
         statuts_recap = ['Présent', 'Absent', 'CONG', 'Tour_rep', 'Repos_med', 'Sans_ph']
         for statut in statuts_recap:
-            worksheet.cell(row=2, column=col_num, value=statut)
+            worksheet1.cell(row=2, column=col_num, value=statut)
             col_num += 1
         
         # Écrire les données
         for row_num, row_data in enumerate(columns_data, 3):  # Commencer à la ligne 3
             for col_num, value in enumerate(row_data, 1):
-                worksheet.cell(row=row_num, column=col_num, value=value)
+                worksheet1.cell(row=row_num, column=col_num, value=value)
         
         # Appliquer le style aux en-têtes
         header_fill = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
@@ -336,7 +338,7 @@ def create_app():
         
         # Appliquer le style à la première ligne d'en-tête
         for col_num in range(1, len(first_header) + 1):
-            cell = worksheet.cell(row=1, column=col_num)
+            cell = worksheet1.cell(row=1, column=col_num)
             cell.fill = header_fill
             cell.font = header_font
             cell.border = thin_border
@@ -344,7 +346,7 @@ def create_app():
         
         # Appliquer le style à la deuxième ligne d'en-tête
         for col_num in range(1, len(second_header) + 1):
-            cell = worksheet.cell(row=2, column=col_num)
+            cell = worksheet1.cell(row=2, column=col_num)
             cell.fill = header_fill
             cell.font = header_font
             cell.border = thin_border
@@ -353,33 +355,109 @@ def create_app():
         # Appliquer les couleurs aux dates fusionnées
         for (start_col, end_col), color_fill in date_color_map.items():
             for col_num in range(start_col, end_col + 1):
-                cell = worksheet.cell(row=1, column=col_num)
+                cell = worksheet1.cell(row=1, column=col_num)
                 cell.fill = color_fill
                 # Appliquer aussi la couleur aux en-têtes de statuts de cette date
-                statut_cell = worksheet.cell(row=2, column=col_num)
+                statut_cell = worksheet1.cell(row=2, column=col_num)
                 statut_cell.fill = color_fill
         
         # Appliquer une couleur différente pour le récapitulatif
         recap_color = PatternFill(start_color='FFCC99', end_color='FFCC99', fill_type='solid')  # Orange clair
         for col_num in range(recap_start_col, recap_end_col + 1):
-            cell = worksheet.cell(row=1, column=col_num)
+            cell = worksheet1.cell(row=1, column=col_num)
             cell.fill = recap_color
-            statut_cell = worksheet.cell(row=2, column=col_num)
+            statut_cell = worksheet1.cell(row=2, column=col_num)
             statut_cell.fill = recap_color
         
         # Ajuster la largeur des colonnes automatiquement
         for col_num in range(1, len(first_header) + 1):
             max_length = 0
             column_letter = get_column_letter(col_num)
-            for row_num in range(1, worksheet.max_row + 1):
-                cell = worksheet.cell(row=row_num, column=col_num)
+            for row_num in range(1, worksheet1.max_row + 1):
+                cell = worksheet1.cell(row=row_num, column=col_num)
                 try:
                     if len(str(cell.value)) > max_length:
                         max_length = len(str(cell.value))
                 except:
                     pass
             adjusted_width = min(max_length + 2, 15)
-            worksheet.column_dimensions[column_letter].width = adjusted_width
+            worksheet1.column_dimensions[column_letter].width = adjusted_width
+
+        # FEUILLE 2 : Calculs financiers (NOUVELLE FEUILLE)
+        worksheet2 = workbook.create_sheet(title='Calculs Financiers')
+        
+        # En-têtes pour la feuille 2
+        financial_headers = ['Matricule', 'Nom', 'Prénom', 'Poste', 'Site', 'Affaire', 'Classe', 'Affectation', 'Ville', 
+                           'Taux Logement', 'Taux Repas', 'Jours Présent', 'Total Absences', 'Mt logt', 'Mt repas']
+        
+        # Écrire les en-têtes
+        for col_num, header in enumerate(financial_headers, 1):
+            cell = worksheet2.cell(row=1, column=col_num, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.border = thin_border
+            cell.alignment = center_alignment
+        
+        # Préparer les données pour la feuille 2
+        financial_data = []
+        
+        for emp_data in employees_data.values():
+            matricule = emp_data['matricule']
+            totals = employee_totals[matricule]
+            
+            jours_present = totals['present']
+            total_absences = totals['absent'] + totals['cong'] + totals['tour_rep'] + totals['repos_med'] + totals['sans_ph']
+            taux_lgt = emp_data['taux_lgt']
+            taux_repas = emp_data['taux_repas']
+            
+            # Calcul Mt logt selon la condition
+            if total_absences > 15:
+                mt_logt = (taux_lgt * jours_present) - total_absences
+            else:
+                mt_logt = taux_lgt * jours_present
+            
+            # Calcul Mt repas
+            mt_repas = (taux_repas * jours_present) - total_absences
+            
+            financial_data.append([
+                emp_data['matricule'],
+                emp_data['nom'],
+                emp_data['prenom'],
+                emp_data['poste'],
+                emp_data['site'],
+                emp_data['affaire'],
+                emp_data['classe'],
+                emp_data['affectation'],
+                emp_data['ville'],
+                taux_lgt,
+                taux_repas,
+                jours_present,
+                total_absences,
+                mt_logt,
+                mt_repas
+            ])
+        
+        # Écrire les données financières
+        for row_num, row_data in enumerate(financial_data, 2):  # Commencer à la ligne 2
+            for col_num, value in enumerate(row_data, 1):
+                cell = worksheet2.cell(row=row_num, column=col_num, value=value)
+                cell.border = thin_border
+                if col_num >= 14:  # Colonnes Mt logt et Mt repas
+                    cell.alignment = Alignment(horizontal='right')
+        
+        # Ajuster la largeur des colonnes pour la feuille 2
+        for col_num in range(1, len(financial_headers) + 1):
+            max_length = 0
+            column_letter = get_column_letter(col_num)
+            for row_num in range(1, worksheet2.max_row + 1):
+                cell = worksheet2.cell(row=row_num, column=col_num)
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 15)
+            worksheet2.column_dimensions[column_letter].width = adjusted_width
         
         # Sauvegarder le fichier
         workbook.save(out_path)
